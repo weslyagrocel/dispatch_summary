@@ -109,6 +109,11 @@ tr.tot td{font-weight:700;color:var(--total);background:var(--sub-bg)!important;
 
   <div class="panel" id="filterPanel">
     <div class="filters">
+      <div class="field"><label for="fType">Report type</label>
+        <select id="fType">
+          <option value="tcd">Plant-Customer-Transporter</option>
+          <option value="dm">Plant-Customer-Day-Month Cumulative</option>
+        </select></div>
       <div class="field rep-field">
         <label for="fRep">Report date(s) (Second Date) &mdash; select one or multiple</label>
         <div class="rep-row">
@@ -158,7 +163,7 @@ tr.tot td{font-weight:700;color:var(--total);background:var(--sub-bg)!important;
 (function(){
 'use strict';
 var $=function(id){return document.getElementById(id)};
-var S={rows:[],files:[],titles:{},tab:'summary',f:{rep:'',reps:[],from:'',item:'goal',plant:'All',cust:'All',trans:'All',min:'',max:''}};
+var S={rows:[],files:[],titles:{},tab:'summary',f:{rtype:'tcd',rep:'',reps:[],from:'',item:'goal',plant:'All',cust:'All',trans:'All',min:'',max:''}};
 var MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 var MFULL=['January','February','March','April','May','June','July','August','September','October','November','December'];
 var nf0=new Intl.NumberFormat('en-IN',{maximumFractionDigits:0});
@@ -295,7 +300,7 @@ function readFilters(){
   var picked=$('fRep').value;
   if(!S.f.reps||!S.f.reps.length){if(picked)syncReps([picked])}
   S.f.rep=maxRep();
-  S.f.from=$('fFrom').value;S.f.item=$('fItem').value;S.f.plant=$('fPlant').value;
+  S.f.rtype=$('fType').value;S.f.from=$('fFrom').value;S.f.item=$('fItem').value;S.f.plant=$('fPlant').value;
   S.f.cust=$('fCust').value;S.f.trans=$('fTrans').value;S.f.min=$('fMin').value;S.f.max=$('fMax').value;
 }
 function pass(r){
@@ -431,11 +436,14 @@ function render(){
   $('kl2').textContent='Net Wt MT, report date'+(ds.length>1?'s':'')+dLbl;
   $('k1').textContent=nf0.format(day.length);$('k2').textContent=nf2.format(day.reduce(function(s,r){return s+r.mt},0));
   $('k3').textContent=nf0.format(rows.length);$('k4').textContent=nf2.format(rows.reduce(function(s,r){return s+r.mt},0));
+  if(S.f.rtype==='dm'&&S.tab==='email')S.tab='summary';
+  $('tabEmail').hidden=(S.f.rtype==='dm');
   $('tabSummary').setAttribute('aria-selected',S.tab==='summary');$('tabDetail').setAttribute('aria-selected',S.tab==='detail');$('tabEmail').setAttribute('aria-selected',S.tab==='email');
   if(S.f.from>mr){out.innerHTML='<div class="note">Cumulative from is after the report date. Change one of the dates.</div>';return}
   if(!rows.length){out.innerHTML='<div class="panel empty"><h2>No trucks match</h2><p>Nothing was dispatched for these filters between '+fmtDate(S.f.from)+' and '+fmtDate(mr)+'. Widen the dates or set the filters back to All.</p></div>';return}
   if(S.tab==='detail'){out.innerHTML=renderDetail(rows);return}
   if(S.tab==='email'){renderEmailTab();return}
+  if(S.f.rtype==='dm'){out.innerHTML=renderDM();return}
   var m=buildModel(),h='';
   m.forEach(function(p){h+='<div class="plant"># '+esc(p.plant)+'</div>'+p.blocks.map(renderBlock).join('')});
   out.innerHTML=h;
@@ -744,6 +752,126 @@ function buildWorkbook(rows,m){
   return wb;
 }
 
+/* ---------- Report type 2: Plant-Customer-Day-Month Cumulative ---------- */
+var DM_ORDER=['Raw','Washed','Fine','Other'];
+function monthsInRange(from,to){
+  var out=[];if(!from||!to||from>to)return out;
+  var y=+from.slice(0,4),m=+from.slice(5,7),y2=+to.slice(0,4),m2=+to.slice(5,7);
+  while(y<y2||(y===y2&&m<=m2)){out.push(y+'-'+pad(m));m++;if(m>12){m=1;y++}}
+  return out;
+}
+function monthLbl(ym){return MONTHS[+ym.slice(5,7)-1]+' '+ym.slice(0,4)}
+function fyLabel(iso){var y=+iso.slice(0,4),m=+iso.slice(5,7),s=m>=4?y:y-1;return 'FY '+s+'-'+String(s+1).slice(2)}
+function buildDMModel(){
+  var mr=maxRep(),from=S.f.from,ds=repDates(),months=monthsInRange(from,mr);
+  var multiYear=ds.some(function(d){return d.slice(0,4)!==ds[0].slice(0,4)});
+  var sd=function(d){return parseInt(d.slice(8),10)+'-'+MONTHS[+d.slice(5,7)-1]+(multiYear?'-'+d.slice(2,4):'')};
+  var pairs=[];
+  ds.forEach(function(d){pairs.push({a:sd(d)+' Trucks',b:sd(d)+' MTs',day:true})});
+  months.forEach(function(ym){pairs.push({a:monthLbl(ym)+' Trucks',b:monthLbl(ym)+' Net MT'})});
+  if(months.length>1)pairs.push({a:'Total Trucks',b:'Total Net MT',total:true});
+  var agg=function(a){return {n:a.length,m:a.reduce(function(s,r){return s+r.mt},0)}};
+  var all=S.rows.filter(pass),byPlant={};
+  all.forEach(function(r){(byPlant[r.plant]=byPlant[r.plant]||[]).push(r)});
+  var plants=Object.keys(byPlant).sort().map(function(pl){
+    var recs=byPlant[pl],blocks=[];
+    DM_ORDER.forEach(function(g){
+      var gr=recs.filter(function(r){return r.grp===g});
+      if(!gr.length)return;
+      var rows=uniq('cust',gr).map(function(c){
+        var x=gr.filter(function(r){return r.cust===c&&r.date>=from&&r.date<=mr}),cells=[];
+        ds.forEach(function(d){cells.push(agg(x.filter(function(r){return r.date===d})))});
+        var mc=months.map(function(ym){return agg(x.filter(function(r){return r.date.slice(0,7)===ym}))});
+        cells=cells.concat(mc);
+        if(months.length>1)cells.push(agg(x));
+        return {cust:c,cells:cells};
+      });
+      var tot=pairs.map(function(p,i){return rows.reduce(function(a,r){return {n:a.n+r.cells[i].n,m:a.m+r.cells[i].m}},{n:0,m:0})});
+      blocks.push({grp:g,title:GRP_NAME[g]+' DISPATCH - '+pl,rows:rows,tot:tot});
+    });
+    return {plant:pl,banner:'# PLANT: '+pl+' — DISPATCH SUMMARY - '+longDatesText(ds,false).toUpperCase(),blocks:blocks};
+  });
+  return {
+    title:'MULTI-MONTH SALT DISPATCH SUMMARY (PLANT -> PRODUCT -> CUSTOMER)',
+    sub:'Selected Months ('+months.length+'): '+months.map(monthLbl).join(', ')+'  |  Indian FY: '+fyLabel(mr)+' YTM/YTD',
+    pairs:pairs,plants:plants,dates:ds
+  };
+}
+function renderDM(){
+  var m=buildDMModel(),h='';
+  var z0=function(v){return v?nf0.format(v):'-'},z2=function(v){return v?nf2.format(v):'-'};
+  h+='<div class="block"><h3 class="btitle">'+esc(m.title)+'</h3><div class="sub">'+esc(m.sub)+'</div></div>';
+  m.plants.forEach(function(p){
+    h+='<div class="plant" style="font-size:20px;letter-spacing:.03em">'+esc(p.banner)+'</div>';
+    p.blocks.forEach(function(b){
+      h+='<div class="block"><h3 class="btitle" style="'+(b.grp==='Raw'?'color:var(--total)':'')+'">'+esc(b.title)+'</h3><div class="scroll"><table><thead><tr><th>Customer Name</th>'+
+        m.pairs.map(function(pr){return '<th class="sep">'+esc(pr.a)+'</th><th>'+esc(pr.b)+'</th>'}).join('')+'</tr></thead><tbody>';
+      b.rows.forEach(function(r){
+        h+='<tr><td>'+esc(r.cust)+'</td>'+r.cells.map(function(c){return '<td class="sep">'+z0(c.n)+'</td><td>'+z2(c.m)+'</td>'}).join('')+'</tr>';
+      });
+      h+='<tr class="tot"><td>Total '+esc(b.title)+'</td>'+b.tot.map(function(c){return '<td class="sep">'+z0(c.n)+'</td><td>'+z2(c.m)+'</td>'}).join('')+'</tr></tbody></table></div></div>';
+    });
+  });
+  return h;
+}
+function buildWorkbookDM(){
+  var NAVY='FF002060',BORDER='FFCBD5E1',INK='FF0F172A';
+  var m=buildDMModel();
+  var wb=new ExcelJS.Workbook();wb.creator='Dispatch Summary Builder';wb.created=new Date();
+  var ws=wb.addWorksheet('Customer Wise Dispatch Summary',{views:[{showGridLines:false}],pageSetup:{orientation:'landscape',fitToPage:true,fitToWidth:1,fitToHeight:0,paperSize:9}});
+  var nc=m.pairs.length*2,last=2+nc;
+  ws.getColumn(1).width=4;ws.getColumn(2).width=38;
+  for(var c=3;c<=last;c++)ws.getColumn(c).width=(c%2===1)?12:15;
+  var bd={top:{style:'thin',color:{argb:BORDER}},left:{style:'thin',color:{argb:BORDER}},bottom:{style:'thin',color:{argb:BORDER}},right:{style:'thin',color:{argb:BORDER}}};
+  var F=function(hex){return {type:'pattern',pattern:'solid',fgColor:{argb:hex}}};
+  var NF0='#,##0;-#,##0;"-"',NF2='#,##0.00;-#,##0.00;"-"';
+  function put(r,c,v,o){
+    var cell=ws.getCell(r,c);if(v!==undefined&&v!==null)cell.value=v;
+    cell.font={name:'Calibri',size:o.size||10,bold:!!o.bold,color:{argb:o.color||INK}};
+    if(o.bg)cell.fill=F(o.bg);
+    cell.alignment={horizontal:o.h||'left',vertical:'middle',wrapText:!!o.wrap};
+    if(o.nf)cell.numFmt=o.nf;
+    if(o.border)cell.border=bd;
+    return cell;
+  }
+  var r=2;
+  put(r,2,m.title,{size:16,bold:true,color:NAVY});ws.getRow(r).height=21;r++;
+  put(r,2,m.sub,{size:11,bold:true,color:'FF475569'});r+=2;
+  var L=function(c){return ws.getColumn(c).letter};
+  m.plants.forEach(function(p){
+    ws.mergeCells(r,2,r,last);
+    put(r,2,p.banner,{size:13,bold:true,color:NAVY,bg:'FFE9EFFB'});
+    ws.getRow(r).height=17;r+=2;
+    p.blocks.forEach(function(b){
+      put(r,2,b.title,{size:11,bold:true,color:b.grp==='Raw'?'FFFF0000':NAVY});r++;
+      put(r,2,'Customer Name',{bold:true,color:'FFFFFFFF',bg:NAVY,border:1,h:'left'});
+      m.pairs.forEach(function(pr,i){
+        put(r,3+i*2,pr.a,{bold:true,color:'FFFFFFFF',bg:NAVY,border:1,h:'center',wrap:true});
+        put(r,4+i*2,pr.b,{bold:true,color:'FFFFFFFF',bg:NAVY,border:1,h:'center',wrap:true});
+      });
+      ws.getRow(r).height=26;r++;
+      var r0=r;
+      b.rows.forEach(function(row){
+        put(r,2,row.cust,{bg:'FFFFFFFF',border:1,h:'left'});
+        row.cells.forEach(function(cl,i){
+          put(r,3+i*2,cl.n,{bg:'FFFFFFFF',border:1,h:'right',nf:NF0});
+          put(r,4+i*2,+cl.m.toFixed(2),{bg:'FFFFFFFF',border:1,h:'right',nf:NF2});
+        });
+        r++;
+      });
+      var r1=r-1;
+      put(r,2,'Total '+b.title,{bold:true,color:NAVY,bg:'FFF1F5F9',border:1});
+      b.tot.forEach(function(cl,i){
+        var a=L(3+i*2),z=L(4+i*2);
+        put(r,3+i*2,{formula:'SUM('+a+r0+':'+a+r1+')',result:cl.n},{bold:true,color:NAVY,bg:'FFF1F5F9',border:1,h:'right',nf:NF0});
+        put(r,4+i*2,{formula:'SUM('+z+r0+':'+z+r1+')',result:+cl.m.toFixed(2)},{bold:true,color:NAVY,bg:'FFF1F5F9',border:1,h:'right',nf:NF2});
+      });
+      r+=2;
+    });
+  });
+  return wb;
+}
+
 function browserSave(name,buf,mime){
   var blob=new Blob([buf],{type:mime||'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
   var url=URL.createObjectURL(blob),a=document.createElement('a');
@@ -753,6 +881,7 @@ function browserSave(name,buf,mime){
 }
 function exportFileName(){
   var ds=repDates();
+  if(S.f.rtype==='dm')return 'Customer Wise Dispatch Summary '+(ds.length>1?ds.map(fmtDate).join(' & '):(S.f.rep||'Report'))+'.xlsx';
   return 'Dispatch Summary '+(ds.length>1?ds.map(fmtDate).join(' & '):(S.f.rep||'Report'))+'.xlsx';
 }
 function exportXlsx(){
@@ -761,7 +890,7 @@ function exportXlsx(){
     if(!window.ExcelJS)throw new Error('The Excel library did not load. Check your internet connection and reload the page.');
     var rows=cumRows();
     if(!rows.length){setStatus('Nothing to export for these filters.',true);return}
-    var wb=buildWorkbook(rows,buildModel()),name=exportFileName();
+    var wb=(S.f.rtype==='dm')?buildWorkbookDM():buildWorkbook(rows,buildModel()),name=exportFileName();
     setStatus('Preparing '+name+' ...');
     wb.xlsx.writeBuffer().then(function(buf){
       var hasRt=window.claude&&window.claude.use;
@@ -1057,7 +1186,7 @@ $('btnPrevDate').addEventListener('click',function(){
   S.mail.subjectEdited=false;
   if(S.rows.length)render(); else renderRepChips();
 });
-['fFrom','fItem','fPlant','fCust','fTrans','fMin','fMax'].forEach(function(id){$(id).addEventListener('change',function(){if(S.rows.length)render()})});
+['fType','fFrom','fItem','fPlant','fCust','fTrans','fMin','fMax'].forEach(function(id){$(id).addEventListener('change',function(){if(S.rows.length)render()})});
 $('btnExport').addEventListener('click',exportXlsx);
 $('tabSummary').addEventListener('click',function(){S.tab='summary';render()});
 $('tabDetail').addEventListener('click',function(){S.tab='detail';render()});
